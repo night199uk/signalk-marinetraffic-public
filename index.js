@@ -338,46 +338,6 @@ function numberToString(vessel, num)
   return '' + num
 }
 
-  {
-    path: "design.draft",
-    key: "DRAUGHT",
-    conversion: function(vessel, val) {
-      if ( val == 0 )
-        return null
-      return { maximum: val }
-    }
-  },
-  {
-    path: 'navigation.position',
-    key: "LAT",
-    conversion: function(vessel, val) {
-      return { latitude: val, longitude:vessel.LONGITUDE }
-    }
-  },
-  {
-    path: "navigation.speedOverGround",
-    key: "SOG",
-    conversion: function(vessel, val) {
-      if ( val == 102.4 )
-        return null;
-      return val * 0.514444
-    }
-  },
-  {
-    path: "design.aisShipType",
-    key: "TYPE",
-    conversion: function(vessel, val) {
-      const name = schema.getAISShipTypeName(val)
-      if ( name ) {
-        return { id: val, 'name': name }
-      } else {
-        return null
-      }
-    }
-  },
-]
-
-
 function mod(x,y){
   return x-y*Math.floor(x/y)
 }
