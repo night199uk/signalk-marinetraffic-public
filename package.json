@@ -1,0 +1,31 @@
+{
+  "name": "signalk-marinetraffic-public",
+  "version": "0.0.1",
+  "description": "SignalK plugin to grab data from Marine Traffic's public web site to signalk vessels",
+  "main": "index.js",
+  "signalk-plugin-enabled-by-default": true,
+  "scripts": {
+    "test": "$NODE $npm_package_main"
+  },
+  "keywords": [
+    "signalk-node-server-plugin",
+    "signalk-category-ais"
+  ],
+  "author": {
+    "name": "Chris Roberts",
+    "email": "chris@problem-child.org"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@signalk/signalk-schema": "^1.0.3",
+    "bluebird": "^3.0.0",
+    "ggencoder": "^0.1.18",
+    "persistent-node-cache": "^1.2.0",
+    "superagent": "^10.2.3",
+    "superagent-promise": "^1.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/"
+  }
+}
