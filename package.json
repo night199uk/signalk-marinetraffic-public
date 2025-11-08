@@ -1,6 +1,6 @@
 {
   "name": "signalk-marinetraffic-public",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "SignalK plugin to grab data from Marine Traffic's public web site to signalk vessels",
   "main": "index.js",
   "signalk-plugin-enabled-by-default": true,
