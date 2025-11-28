@@ -20,6 +20,7 @@ const schema = require('@signalk/signalk-schema')
 const pnc = require('persistent-node-cache')
 const moment = require('moment')
 const path = require('path')
+const axios = require("axios")
 
 const stateMapping = {
   0: 'motoring',
@@ -57,7 +58,7 @@ module.exports = function(app)
     properties: {
       updaterate: {
         type: "number",
-        title: "Rate to get updates from AisHub (s > 60)",
+        title: "Rate to get updates from MarineTraffic (s > 60)",
         default: 61
       },
       boxEnabled: {
@@ -70,19 +71,19 @@ module.exports = function(app)
         title:"Size of the bounding box to retrieve data (km)",
         default: 10
       },
-      listEnabled: {
-        type: "boolean",
-        title: "Enable MMSI list search",
-        default: false
-      },
-      mmsiList: {
-        type: "array",
-        title: "MMSIs to retrieve even when outside of bounding box",
-        items: {
-          type: "string",
-          title: "MMSI"
-        }
-      }
+//      listEnabled: {
+//        type: "boolean",
+//        title: "Enable MMSI list search",
+//        default: false
+//      },
+//      mmsiList: {
+//        type: "array",
+//        title: "MMSIs to retrieve even when outside of bounding box",
+//        items: {
+//          type: "string",
+//          title: "MMSI"
+//        }
+//      }
     }
   }
 
@@ -117,33 +118,35 @@ module.exports = function(app)
 
   function getShipData(shipid, fetchFunction) {
     if (cache.has(shipid)) {
-      app.debug('Cache hit');
+      app.debug(`Cache hit: ${shipid}`);
       return cache.get(shipid);
     } else {
-      app.debug('Cache miss - fetching new data');
+      app.debug(`Cache miss: ${shipid} fetching new data`);
       var url = `https://www.marinetraffic.com/en/vessels/${shipid}/general`;
       app.debug("url: %o", url); 
-      fetch(url, {
+      axios.get(url, {
         'headers': {
-          'Accept': '*/*',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Cache-Control': 'no-cache', 
-          'Pragma': 'no-cache',
-          'Priority': 'u=1, i',
-          'Sec-Ch-Ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-          'Sec-Ch-Ua-Mobile': '?0',
-          'Sec-Ch-Ua-Platform': '"Linux"',
-          'Sec-Fetch-Dest': 'empty',
-          'Sec-Fetch-Mode': 'cors',
-          'Sec-Fetch-Site': 'same-origin',
-          'X-Requested-With': 'XMLHttpRequest',
-          'Referer': 'https://www.marinetraffic.com/en/ais/home/shipid:7814591/zoom:11',
+          "Accept": "*/*",
+          "Accept-Encoding": "gzip, deflate, br, zstd",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Connection": "close",
+          "Cache-Control": "no-cache",
+          "Host": "www.marinetraffic.com",
+          "Pragma": "no-cache",
+          "Priority": "u=1, i",
+          "Referer": "https://www.marinetraffic.com/",
+          "Sec-Ch-Ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
+          "Sec-Ch-Ua-Mobile": "?0",
+          "Sec-Ch-Ua-Platform": "\"Linux\"",
+          "Sec-Fetch-Dest": "empty",
+          "Sec-Fetch-Mode": "cors",
+          "Sec-Fetch-Site": "same-origin",
+          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
+          "X-Requested-With": "XMLHttpRequest",
         },
-      'body': null,
-      'method': 'GET'
       }).then(async function(response) {
-        ship = await response.json();
-        cache.set(shipid, ship);
+        app.debug(response.data);
+        cache.set(shipid, response.data);
 	return ship;
       });
     }
@@ -214,7 +217,7 @@ module.exports = function(app)
   plugin.start = function(options)
   {
     cache = new pnc.PersistentNodeCache("ships", 1000, app.getDataDirPath());
-    var update = function()
+    var update = async function()
     {
       var position = app.getSelfPath('navigation.position')
       app.debug("position: %o", position)
@@ -235,29 +238,29 @@ module.exports = function(app)
         for (let y = southwest.y; y <= northeast.y+1; y++) {
           var url = `https://www.marinetraffic.com/getData/get_data_json_4/z:10/X:${x}/Y:${y}/station:0`
           app.debug("url: %o", url);
-          fetch(url, {
+          const response = await axios.get(url, {
             'headers': {
-              'Accept': '*/*',
-              'Accept-Language': 'en-US,en;q=0.9',
-              'Cache-Control': 'no-cache',
-              'Pragma': 'no-cache',
-              'Priority': 'u=1, i',
-              'Sec-Ch-Ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-              'Sec-Ch-Ua-Mobile': '?0',
-              'Sec-Ch-Ua-Platform': '"Linux"',
-              'Sec-Fetch-Dest': 'empty',
-              'Sec-Fetch-Mode': 'cors',
-              'Sec-Fetch-Site': 'same-origin',
-              'X-Requested-With': 'XMLHttpRequest',
-              'Referer': 'https://www.marinetraffic.com/en/ais/home/shipid:7814591/zoom:11',
+              "Accept": "*/*",
+              "Accept-Encoding": "gzip, deflate, br, zstd",
+              "Accept-Language": "en-US,en;q=0.9",
+              "Connection": "close",
+              "Cache-Control": "no-cache",
+              "Host": "www.marinetraffic.com",
+              "Pragma": "no-cache",
+              "Priority": "u=1, i",
+              "Referer": "https://www.marinetraffic.com/",
+              "Sec-Ch-Ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
+              "Sec-Ch-Ua-Mobile": "?0",
+              "Sec-Ch-Ua-Platform": "\"Linux\"",
+              "Sec-Fetch-Dest": "empty",
+              "Sec-Fetch-Mode": "cors",
+              "Sec-Fetch-Site": "same-origin",
+              'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
+              "X-Requested-With": "XMLHttpRequest",
             },
-          'body': null,
-          'method': 'GET'
-	  }).then(async function(response) {
-            vessels = await response.json();
-//            app.debug(vessels);
-            marineTrafficToDeltas(vessels);
-          })
+	  })
+          app.debug('%o', response.data);
+          marineTrafficToDeltas(response.data);
         }
       }
     }
@@ -266,7 +269,7 @@ module.exports = function(app)
 
     if ( !rate || rate <=60 )
       rate = 61
-    update()
+    setTimeout(update, 5000)
     timeout = setInterval(update, rate * 1000)
   }
 
