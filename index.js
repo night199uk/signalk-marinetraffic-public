@@ -89,9 +89,9 @@ module.exports = function(app)
 
   function marineTrafficToDeltas(response)
   {
-    app.debug("response: " + JSON.stringify(response))
     response.data.rows.forEach(vessel => {
       app.debug('found vessel %j', vessel)
+
       var delta = getVesselDelta(vessel)
 
       if ( delta == null ) {
@@ -154,6 +154,10 @@ module.exports = function(app)
 
   function getVesselDelta(vessel)
   {
+    if (!isNumeric(vessel.SHIP_ID))
+    {
+      return null
+    }
     ship = getShipData(vessel.SHIP_ID);
     app.debug(ship);
     // signalk indexes on mmsi, so no mmsi == no bueno
@@ -336,6 +340,12 @@ function addValue(delta, path, value)
   }
 }
 
+function isNumeric(str) 
+{
+  if (typeof str != "string") return false // we only process strings!  
+  return !isNaN(str) && // use type coercion to parse the _entirety_ of the string (`parseFloat` alone does not do this)...
+         !isNaN(parseFloat(str)) // ...and ensure strings of whitespace fail
+}
 function numberToString(vessel, num)
 {
   return '' + num
