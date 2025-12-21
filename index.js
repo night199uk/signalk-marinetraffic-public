@@ -90,28 +90,11 @@ module.exports = function(app)
   function marineTrafficToDeltas(response)
   {
     response.data.rows.forEach(vessel => {
-      app.debug('found vessel %j', vessel)
-
       var delta = getVesselDelta(vessel)
-
       if ( delta == null ) {
         return
       }
 
-      /*
-      var existing = app.signalk.root.vessels["urn:mrn:imo:mmsi:" + vessel.MMSI]
-
-      if ( existing )
-      {
-        var ts = _.get(existing, "navigation.position.timestamp")
-        if ( ts )
-        {
-          var existingDate = new Date(ts)
-          
-        }
-      }*/
-      
-      app.debug("vessel delta:  %j", delta)
       app.handleMessage(plugin.id, delta)
     })
   }
@@ -154,6 +137,7 @@ module.exports = function(app)
 
   function getVesselDelta(vessel)
   {
+    app.debug(vessel);
     if (!isNumeric(vessel.SHIP_ID))
     {
       return null
@@ -166,16 +150,9 @@ module.exports = function(app)
       return
     }
 
-    var context = "vessels.urn:mrn:imo:mmsi:" + ship.mmsi;
-    if (context == selfContext) {
-      app.debug(`ignorning vessel: ${context}`)
-      return null
-    }
-
     const now = new Date()
     const then = moment(now).subtract(parseInt(vessel.ELAPSED), "minutes").toDate()
     var delta = {
-      "context": context,
       "updates": [
         {
           "timestamp": then.toISOString(),
@@ -186,35 +163,61 @@ module.exports = function(app)
         }
       ]
     }
+
     addValue(delta, '', { 'mmsi': ship.mmsi });
-    addValue(delta, '', { 'imo': ship.imo });
-    addValue(delta, '', { 'callsign': ship.callsign });
     addValue(delta, '', { 'name': vessel.SHIPNAME });
-    addValue(delta, "navigation.courseOverGroundTrue", degsToRad(parseInt(vessel.COURSE)));
-    addValue(delta, "navigation.headingTrue", degsToRad(parseInt(vessel.HEADING)));
     let position = {
 	    latitude: parseFloat(vessel.LAT),
 	    longitude: parseFloat(vessel.LON),
     };
     addValue(delta, "navigation.position", position);
 
-    if (vessel.DESTINATION != "CLASS B")
+    if (ship.isNavigationalAid)
     {
-      addValue(delta, "navigation.destination.commonName", vessel.DESTINATION);
+      delta['context'] = "atons.urn:mrn:imo:mmsi:" + ship.mmsi;
+
+      let atonType = parseInt(ship.typeId) - 100
+      addValue(delta, 'atonType', 
+	{ 
+          id: atonType,
+          'name': schema.getAtonTypeName(atonType),
+        });
+      addValue(delta, "sensors.ais.class", "ATON");
+    }
+    else
+    {
+      delta['context'] = "vessels.urn:mrn:imo:mmsi:" + ship.mmsi;
+      if (delta['context'] == selfContext) {
+        app.debug(`ignorning vessel: ${context}`)
+        return null
+      }
+
+      addValue(delta, '', { 'imo': ship.imo });
+      addValue(delta, '', { 'callsign': ship.callsign });
+      addValue(delta, "navigation.courseOverGroundTrue", degsToRad(parseInt(vessel.COURSE)));
+      addValue(delta, "navigation.headingTrue", degsToRad(parseInt(vessel.HEADING)));
+      if (vessel.DESTINATION != "CLASS B")
+      {
+        addValue(delta, "navigation.destination.commonName", vessel.DESTINATION);
+      }
+
+      // convert knots to kph
+      let speedOverGround = (parseInt(vessel.SPEED) / 10) * 0.514444;
+      addValue(delta, "navigation.speedOverGround", speedOverGround);
+      addValue(delta, "design.beam", parseInt(vessel.WIDTH));
+      addValue(delta, "design.length", { 'overall': parseInt(vessel.LENGTH) });
+      addValue(delta, "sensors.ais.fromCenter", parseInt(vessel.W_LEFT));
+      addValue(delta, "sensors.ais.fromBow", parseInt(vessel.L_FORE));
+
+      let shipType = parseInt(ship.typeId)
+      addValue(delta, "design.aisShipType", 
+        {
+          id: shipType,
+          'name': schema.getAISShipTypeName(shipType),
+        });
     }
 
-    // convert knots to kph
-    let speedOverGround = (parseInt(vessel.SPEED) / 10) * 0.514444;
-    addValue(delta, "navigation.speedOverGround", speedOverGround);
-    addValue(delta, "design.beam", parseInt(vessel.WIDTH));
-    addValue(delta, "design.length", { 'overall': parseInt(vessel.LENGTH) });
-    addValue(delta, "sensors.ais.fromCenter", parseInt(vessel.W_LEFT));
-    addValue(delta, "sensors.ais.fromBow", parseInt(vessel.L_FORE));
-    addValue(delta, "design.aisShipType", 
-      {
-        id: parseInt(ship.typeId),
-        'name': schema.getAISShipTypeName(ship.typeId),
-      });
+    app.debug(delta)
     return delta;
   }
   
@@ -238,8 +241,11 @@ module.exports = function(app)
       southwest = degs2tile(box.latmin, box.lonmin, 10)
       northeast = degs2tile(box.latmax, box.lonmax, 10)
 
+      app.debug("box: %o", box)
+      app.debug("southwest: %o", southwest)
+      app.debug("northeast: %o", northeast)
       for (let x = southwest.x; x <= northeast.x+1; x++) {
-        for (let y = southwest.y; y <= northeast.y+1; y++) {
+        for (let y = southwest.y; y >= northeast.y-1; y--) {
           var url = `https://www.marinetraffic.com/getData/get_data_json_4/z:10/X:${x}/Y:${y}/station:0`
           app.debug("url: %o", url);
           const response = await axios.get(url, {
