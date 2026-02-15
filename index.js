@@ -106,7 +106,6 @@ module.exports = function(app)
     } else {
       app.debug(`Cache miss: ${shipid} fetching new data`);
       var url = `https://www.marinetraffic.com/en/vessels/${shipid}/general`;
-      app.debug("url: %o", url); 
       axios.get(url, {
         'headers': {
           "Accept": "*/*",
@@ -130,7 +129,7 @@ module.exports = function(app)
       }).then(async function(response) {
         app.debug(response.data);
         cache.set(shipid, response.data);
-	return ship;
+        return ship;
       });
     }
   }
@@ -146,16 +145,14 @@ module.exports = function(app)
     app.debug(ship);
     // signalk indexes on mmsi, so no mmsi == no bueno
     if (typeof ship === 'undefined')
-    {
       return
-    }
 
-    const now = new Date()
-    const then = moment(now).subtract(parseInt(vessel.ELAPSED), "minutes").toDate()
+    const age = moment.utc().subtract(parseInt(vessel.ELAPSED), "minutes")
+
     var delta = {
       "updates": [
         {
-          "timestamp": then.toISOString(),
+          "timestamp": age.toDate().toISOString(),
           "source": {
             "label": "marinetraffic"
           },
@@ -175,10 +172,17 @@ module.exports = function(app)
     if (ship.isNavigationalAid)
     {
       delta['context'] = "atons.urn:mrn:imo:mmsi:" + ship.mmsi;
+      existing = app.getPath(delta['context'])
+      if (existing)
+      {
+        var previous = _.get(existing, "sensors.ais.class.timestamp")
+        if (previous && moment(previous).isAfter(age))
+          return null;
+      }
 
       let atonType = parseInt(ship.typeId) - 100
       addValue(delta, 'atonType', 
-	{ 
+        {
           id: atonType,
           'name': schema.getAtonTypeName(atonType),
         });
@@ -192,10 +196,24 @@ module.exports = function(app)
         return null
       }
 
-      addValue(delta, '', { 'imo': ship.imo });
+      existing = app.getPath(delta['context'])
+      if (existing)
+      {
+        var previous = _.get(existing, "navigation.position.timestamp")
+        if (previous && moment(previous).isAfter(age))
+          return null;
+      }
+
+      if (ship.imo)
+      {
+        addValue(delta, '', { 'imo': ship.imo });
+      }
       addValue(delta, '', { 'callsign': ship.callsign });
       addValue(delta, "navigation.courseOverGroundTrue", degsToRad(parseInt(vessel.COURSE)));
-      addValue(delta, "navigation.headingTrue", degsToRad(parseInt(vessel.HEADING)));
+      if(vessel.HEADING)
+      {
+        addValue(delta, "navigation.headingTrue", degsToRad(parseInt(vessel.HEADING)));
+      }
       if (vessel.DESTINATION != "CLASS B")
       {
         addValue(delta, "navigation.destination.commonName", vessel.DESTINATION);
@@ -217,7 +235,7 @@ module.exports = function(app)
         });
     }
 
-    app.debug(delta)
+    app.debug(JSON.stringify(delta, null, 2))
     return delta;
   }
   
