@@ -19,7 +19,7 @@
   "dependencies": {
     "@signalk/signalk-schema": "^1.0.3",
     "axios": "^1.13.2",
-    "persistent-node-cache": "^1.2.0"
+    "persistent-node-cache": "git://github.com/pobthebuilder/persistent-node-cache.git#fix_odirect"
   },
   "repository": {
     "type": "git",
