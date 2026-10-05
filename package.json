@@ -4,8 +4,12 @@
   "description": "SignalK plugin to grab data from Marine Traffic's public web site to signalk vessels",
   "main": "index.js",
   "signalk-plugin-enabled-by-default": true,
+  "signalk": {
+    "displayName": "MarineTraffic Public",
+    "appIcon": "./icon.svg"
+  },
   "scripts": {
-    "test": "$NODE $npm_package_main"
+    "test": "node --check index.js"
   },
   "keywords": [
     "signalk-node-server-plugin",

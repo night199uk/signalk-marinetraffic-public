@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="MarineTraffic Public">
+  <!--
+    Original icon for signalk-marinetraffic-public.
+
+    Uses the MarineTraffic brand blue palette (Dark Blue #263A75,
+    Blue #037FD7, Light Blue #0FB9E9) for visual familiarity, but the artwork
+    itself is original: it does not reproduce the MarineTraffic / Kpler logo or
+    any other asset from their site.
+
+    This plugin is unofficial and is not affiliated with or endorsed by
+    MarineTraffic / Kpler.
+
+    Licensed under the same ISC license as this package.
+  -->
+  <rect width="256" height="256" rx="48" fill="#263A75"/>
+
+  <!-- AIS / signal waves -->
+  <g fill="none" stroke="#0FB9E9" stroke-linecap="round">
+    <path d="M110 104 A18 18 0 0 1 146 104" stroke-width="9"/>
+    <path d="M96 104 A32 32 0 0 1 160 104" stroke-width="9" opacity="0.7"/>
+    <path d="M82 104 A46 46 0 0 1 174 104" stroke-width="9" opacity="0.4"/>
+  </g>
+
+  <!-- mast -->
+  <rect x="125" y="104" width="6" height="26" rx="3" fill="#FFFFFF"/>
+
+  <!-- superstructure -->
+  <path d="M104 170 V128 H152 V170 Z" fill="#FFFFFF"/>
+  <rect x="114" y="138" width="10" height="10" rx="2" fill="#263A75"/>
+  <rect x="132" y="138" width="10" height="10" rx="2" fill="#263A75"/>
+
+  <!-- hull -->
+  <path d="M40 168 H216 L194 204 Q128 216 62 204 Z" fill="#FFFFFF"/>
+
+  <!-- water -->
+  <g stroke="#037FD7" stroke-width="8" stroke-linecap="round" opacity="0.9">
+    <path d="M34 228 H96"/>
+    <path d="M116 228 H140"/>
+    <path d="M160 228 H222"/>
+  </g>
+</svg>

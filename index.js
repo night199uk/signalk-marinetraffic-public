@@ -14,47 +14,91 @@
  * limitations under the License.
  */
 
-const fs = require("fs");
 const _ = require('lodash')
 const schema = require('@signalk/signalk-schema')
 const pnc = require('persistent-node-cache')
 const moment = require('moment')
-const path = require('path')
 const axios = require("axios")
 
-const stateMapping = {
-  0: 'motoring',
-  1: 'anchored',
-  2: 'not under command',
-  3: 'restricted manouverability',
-  4: 'constrained by draft',
-  5: 'moored',
-  6: 'aground',
-  7: 'fishing',
-  8: 'sailing',
-  9: 'hazardous material high speed',
-  10: 'hazardous material wing in ground',
-  14: 'ais-sart',
-  15: undefined
-}
+// Cloudflare rejects our queries when we poll too fast. That is expected
+// behaviour rather than a plugin fault, so it is logged as info instead of
+// being allowed to surface as a huge unhandled rejection stack trace.
+const REJECTED_MESSAGE =
+  'MarineTraffic rejected our query - most likely caused by querying too fast. Ignoring.'
 
+const MARINETRAFFIC_HEADERS = {
+  "Accept": "*/*",
+  "Accept-Encoding": "gzip, deflate, br, zstd",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Connection": "close",
+  "Cache-Control": "no-cache",
+  "Host": "www.marinetraffic.com",
+  "Pragma": "no-cache",
+  "Priority": "u=1, i",
+  "Referer": "https://www.marinetraffic.com/",
+  "Sec-Ch-Ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
+  "Sec-Ch-Ua-Mobile": "?0",
+  "Sec-Ch-Ua-Platform": "\"Linux\"",
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Site": "same-origin",
+  'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
+  "X-Requested-With": "XMLHttpRequest",
+}
 
 module.exports = function(app)
 {
   var plugin = {};
-  var timeout = undefined
+  var startTimeout = undefined
+  var interval = undefined
   let selfContext = 'vessels.' + app.selfId
   let cache = undefined
+
+  // Set when MarineTraffic rate limits us. Reset at the start of each poll
+  // cycle; while set we neither log again nor send further requests.
+  let rateLimited = false
   
   plugin.id = "signalk-marinetraffic-public"
   plugin.name = "MarineTraffic Public"
   plugin.description = plugin.name
 
+  // The Signal K plugin API only guarantees app.debug/app.error, so fall back
+  // to console.info (which the server log captures as a non-error line) when
+  // the running server has no app.info.
+  function logInfo(msg) {
+    if (typeof app.info === 'function') {
+      app.info(msg)
+    } else {
+      console.info(`signalk-marinetraffic-public:${msg}`)
+    }
+  }
+
+  function isRateLimited(err) {
+    return !!err && !!err.response && err.response.status === 403
+  }
+
+  // GET a MarineTraffic URL. A 403 means Cloudflare is rate limiting us: we
+  // log once and trip the circuit breaker for the rest of this cycle, so the
+  // caller abandons the cycle instead of hammering the site further. Any other
+  // error is rethrown unchanged.
+  async function marineTrafficGet(url) {
+    if (rateLimited) {
+      return null
+    }
+    try {
+      return await axios.get(url, { headers: MARINETRAFFIC_HEADERS })
+    } catch (err) {
+      if (isRateLimited(err)) {
+        rateLimited = true
+        logInfo(REJECTED_MESSAGE)
+        return null
+      }
+      throw err
+    }
+  }
+
   plugin.schema = {
     type: "object",
-    required: [
-      "apikey", "url"
-    ],
     properties: {
       updaterate: {
         type: "number",
@@ -87,65 +131,50 @@ module.exports = function(app)
     }
   }
 
-  function marineTrafficToDeltas(response)
+  async function marineTrafficToDeltas(response)
   {
-    response.data.rows.forEach(vessel => {
-      var delta = getVesselDelta(vessel)
+    for (const vessel of response.data.rows) {
+      var delta = await getVesselDelta(vessel)
       if ( delta == null ) {
-        return
+        continue
       }
 
       app.handleMessage(plugin.id, delta)
-    })
-  }
-
-  function getShipData(shipid, fetchFunction) {
-    if (cache.has(shipid)) {
-      app.debug(`Cache hit: ${shipid}`);
-      return cache.get(shipid);
-    } else {
-      app.debug(`Cache miss: ${shipid} fetching new data`);
-      var url = `https://www.marinetraffic.com/en/vessels/${shipid}/general`;
-      axios.get(url, {
-        'headers': {
-          "Accept": "*/*",
-          "Accept-Encoding": "gzip, deflate, br, zstd",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Connection": "close",
-          "Cache-Control": "no-cache",
-          "Host": "www.marinetraffic.com",
-          "Pragma": "no-cache",
-          "Priority": "u=1, i",
-          "Referer": "https://www.marinetraffic.com/",
-          "Sec-Ch-Ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
-          "Sec-Ch-Ua-Mobile": "?0",
-          "Sec-Ch-Ua-Platform": "\"Linux\"",
-          "Sec-Fetch-Dest": "empty",
-          "Sec-Fetch-Mode": "cors",
-          "Sec-Fetch-Site": "same-origin",
-          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-          "X-Requested-With": "XMLHttpRequest",
-        },
-      }).then(async function(response) {
-        app.debug(response.data);
-        cache.set(shipid, response.data);
-        return ship;
-      });
     }
   }
 
-  function getVesselDelta(vessel)
+  // Resolve a vessel's static details, fetching them on first sight. Returns
+  // undefined when the details are unavailable (e.g. we were rate limited), in
+  // which case the caller skips the vessel until a later cycle.
+  async function getShipData(shipid) {
+    if (cache.has(shipid)) {
+      app.debug(`Cache hit: ${shipid}`);
+      return cache.get(shipid);
+    }
+
+    app.debug(`Cache miss: ${shipid} fetching new data`);
+    var url = `https://www.marinetraffic.com/en/vessels/${shipid}/general`;
+    const response = await marineTrafficGet(url);
+    if (response === null) {
+      return undefined;
+    }
+    app.debug(response.data);
+    cache.set(shipid, response.data);
+    return response.data;
+  }
+
+  async function getVesselDelta(vessel)
   {
     app.debug(vessel);
     if (!isNumeric(vessel.SHIP_ID))
     {
       return null
     }
-    ship = getShipData(vessel.SHIP_ID);
+    const ship = await getShipData(vessel.SHIP_ID);
     app.debug(ship);
     // signalk indexes on mmsi, so no mmsi == no bueno
-    if (typeof ship === 'undefined')
-      return
+    if (typeof ship === 'undefined' || ship.mmsi === undefined || ship.mmsi === null)
+      return null
 
     const age = moment.utc().subtract(parseInt(vessel.ELAPSED), "minutes")
 
@@ -172,10 +201,10 @@ module.exports = function(app)
     if (ship.isNavigationalAid)
     {
       delta['context'] = "atons.urn:mrn:imo:mmsi:" + ship.mmsi;
-      existing = app.getPath(delta['context'])
+      const existing = app.getPath(delta['context'])
       if (existing)
       {
-        var previous = _.get(existing, "sensors.ais.class.timestamp")
+        const previous = _.get(existing, "sensors.ais.class.timestamp")
         if (previous && moment(previous).isAfter(age))
           return null;
       }
@@ -191,15 +220,15 @@ module.exports = function(app)
     else
     {
       delta['context'] = "vessels.urn:mrn:imo:mmsi:" + ship.mmsi;
-      if (delta['context'] == selfContext) {
-        app.debug(`ignorning vessel: ${context}`)
+      if (delta['context'] === selfContext) {
+        app.debug(`ignoring vessel: ${delta['context']}`)
         return null
       }
 
-      existing = app.getPath(delta['context'])
+      const existing = app.getPath(delta['context'])
       if (existing)
       {
-        var previous = _.get(existing, "navigation.position.timestamp")
+        const previous = _.get(existing, "navigation.position.timestamp")
         if (previous && moment(previous).isAfter(age))
           return null;
       }
@@ -208,7 +237,10 @@ module.exports = function(app)
       {
         addValue(delta, '', { 'imo': ship.imo });
       }
-      addValue(delta, '', { 'callsign': ship.callsign });
+      if (ship.callsign)
+      {
+        addValue(delta, '', { 'callsign': ship.callsign });
+      }
       addValue(delta, "navigation.courseOverGroundTrue", degsToRad(parseInt(vessel.COURSE)));
       if(vessel.HEADING)
       {
@@ -242,8 +274,19 @@ module.exports = function(app)
   plugin.start = function(options)
   {
     cache = new pnc.PersistentNodeCache("ships", 1000, app.getDataDirPath());
-    var update = async function()
+
+    var doUpdate = async function()
     {
+      rateLimited = false
+
+      // The bounding box search is the only data source; honour the schema
+      // option rather than ignoring it.
+      if (options.boxEnabled === false)
+      {
+        app.debug("bounding box search disabled")
+        return
+      }
+
       var position = app.getSelfPath('navigation.position')
       app.debug("position: %o", position)
       if ( typeof position !== 'undefined' && position.value )
@@ -256,40 +299,40 @@ module.exports = function(app)
 
       var box = calc_boundingbox(options, position)
       publishBox(box)
-      southwest = degs2tile(box.latmin, box.lonmin, 10)
-      northeast = degs2tile(box.latmax, box.lonmax, 10)
+      const southwest = degs2tile(box.latmin, box.lonmin, 10)
+      const northeast = degs2tile(box.latmax, box.lonmax, 10)
 
       app.debug("box: %o", box)
       app.debug("southwest: %o", southwest)
       app.debug("northeast: %o", northeast)
       for (let x = southwest.x; x <= northeast.x+1; x++) {
         for (let y = southwest.y; y >= northeast.y-1; y--) {
+          if (rateLimited) {
+            app.debug("rate limited, abandoning the rest of this cycle")
+            return
+          }
           var url = `https://www.marinetraffic.com/getData/get_data_json_4/z:10/X:${x}/Y:${y}/station:0`
           app.debug("url: %o", url);
-          const response = await axios.get(url, {
-            'headers': {
-              "Accept": "*/*",
-              "Accept-Encoding": "gzip, deflate, br, zstd",
-              "Accept-Language": "en-US,en;q=0.9",
-              "Connection": "close",
-              "Cache-Control": "no-cache",
-              "Host": "www.marinetraffic.com",
-              "Pragma": "no-cache",
-              "Priority": "u=1, i",
-              "Referer": "https://www.marinetraffic.com/",
-              "Sec-Ch-Ua": "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
-              "Sec-Ch-Ua-Mobile": "?0",
-              "Sec-Ch-Ua-Platform": "\"Linux\"",
-              "Sec-Fetch-Dest": "empty",
-              "Sec-Fetch-Mode": "cors",
-              "Sec-Fetch-Site": "same-origin",
-              'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-              "X-Requested-With": "XMLHttpRequest",
-            },
-	  })
+          const response = await marineTrafficGet(url)
+          if (response === null) {
+            // null only happens when the circuit breaker tripped; the outer
+            // loop will observe the flag and stop.
+            continue
+          }
           app.debug('%o', response.data);
-          marineTrafficToDeltas(response.data);
+          await marineTrafficToDeltas(response.data);
         }
+      }
+    }
+
+    // Keep a failing cycle from escaping as an unhandled rejection and taking
+    // the whole server log with it.
+    var update = async function()
+    {
+      try {
+        await doUpdate()
+      } catch (err) {
+        app.error(`update failed: ${err && err.message ? err.message : err}`)
       }
     }
 
@@ -297,15 +340,19 @@ module.exports = function(app)
 
     if ( !rate || rate <=60 )
       rate = 61
-    setTimeout(update, 5000)
-    timeout = setInterval(update, rate * 1000)
+    startTimeout = setTimeout(update, 5000)
+    interval = setInterval(update, rate * 1000)
   }
 
   plugin.stop = function()
   {
-    if ( timeout ) {
-      clearInterval(timeout)
-      timeout = undefined
+    if ( startTimeout ) {
+      clearTimeout(startTimeout)
+      startTimeout = undefined
+    }
+    if ( interval ) {
+      clearInterval(interval)
+      interval = undefined
     }
   }
 
@@ -334,10 +381,6 @@ module.exports = function(app)
   return plugin
 }
          
-function degsToRadC(vessel, degrees) {
-  return degrees * (Math.PI/180.0);
-}
-
 function degsToRad(degrees) {
   return degrees * (Math.PI/180.0);
 }
@@ -358,10 +401,17 @@ function degs2tile(lat, lng, zoom) {
 
 function addValue(delta, path, value)
 {
-  if ( typeof value !== 'undefined' )
+  if ( typeof value === 'undefined' || value === null )
   {
-    delta.updates[0].values.push({path: path, value: value})
+    return
   }
+  // MarineTraffic omits fields for some vessels; parseInt/parseFloat of those
+  // yields NaN, which must never be published into the Signal K tree.
+  if ( typeof value === 'number' && !Number.isFinite(value) )
+  {
+    return
+  }
+  delta.updates[0].values.push({path: path, value: value})
 }
 
 function isNumeric(str) 
@@ -369,10 +419,6 @@ function isNumeric(str)
   if (typeof str != "string") return false // we only process strings!  
   return !isNaN(str) && // use type coercion to parse the _entirety_ of the string (`parseFloat` alone does not do this)...
          !isNaN(parseFloat(str)) // ...and ensure strings of whitespace fail
-}
-function numberToString(vessel, num)
-{
-  return '' + num
 }
 
 function mod(x,y){
@@ -415,10 +461,4 @@ function calc_boundingbox(opions, position)
     'lonmax': max_lon.longitude
   }
 }
-
-const ensureDirectoryExists = (path) => {
-  if (!fs.existsSync(path)) {
-    fs.mkdirSync(path);
-  }
-};
 
