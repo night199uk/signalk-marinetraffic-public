@@ -26,6 +26,15 @@ const axios = require("axios")
 const REJECTED_MESSAGE =
   'MarineTraffic rejected our query - most likely caused by querying too fast. Ignoring.'
 
+// Optional companion plugin whose buddy list we can read in-process via
+// app.getPluginOptions(). Declared as signalk.recommends in package.json.
+const BUDDY_PLUGIN_ID = 'signalk-buddylist-plugin'
+
+// Minimum seconds between buddy location fetches. Each buddy costs two
+// MarineTraffic requests, so don't let this be configured aggressively.
+const BUDDY_FETCH_MIN_SECONDS = 60
+const BUDDY_FETCH_DEFAULT_SECONDS = 300
+
 const MARINETRAFFIC_HEADERS = {
   "Accept": "*/*",
   "Accept-Encoding": "gzip, deflate, br, zstd",
@@ -51,12 +60,16 @@ module.exports = function(app)
   var plugin = {};
   var startTimeout = undefined
   var interval = undefined
+  var buddyStartTimeout = undefined
+  var buddyInterval = undefined
   let selfContext = 'vessels.' + app.selfId
   let cache = undefined
 
-  // Set when MarineTraffic rate limits us. Reset at the start of each poll
-  // cycle; while set we neither log again nor send further requests.
-  let rateLimited = false
+  // Circuit breaker state, one per flow. Set when MarineTraffic rate limits
+  // us; reset at the start of each cycle. While set we neither log again nor
+  // send further requests for that flow.
+  const boxState = { rateLimited: false }
+  const buddyState = { rateLimited: false }
   
   plugin.id = "signalk-marinetraffic-public"
   plugin.name = "MarineTraffic Public"
@@ -78,18 +91,18 @@ module.exports = function(app)
   }
 
   // GET a MarineTraffic URL. A 403 means Cloudflare is rate limiting us: we
-  // log once and trip the circuit breaker for the rest of this cycle, so the
-  // caller abandons the cycle instead of hammering the site further. Any other
-  // error is rethrown unchanged.
-  async function marineTrafficGet(url) {
-    if (rateLimited) {
+  // log once and trip the supplied flow's circuit breaker for the rest of its
+  // cycle, so the caller abandons the cycle instead of hammering the site
+  // further. Any other error is rethrown unchanged.
+  async function marineTrafficGet(url, state) {
+    if (state.rateLimited) {
       return null
     }
     try {
       return await axios.get(url, { headers: MARINETRAFFIC_HEADERS })
     } catch (err) {
       if (isRateLimited(err)) {
-        rateLimited = true
+        state.rateLimited = true
         logInfo(REJECTED_MESSAGE)
         return null
       }
@@ -115,19 +128,17 @@ module.exports = function(app)
         title:"Size of the bounding box to retrieve data (km)",
         default: 10
       },
-//      listEnabled: {
-//        type: "boolean",
-//        title: "Enable MMSI list search",
-//        default: false
-//      },
-//      mmsiList: {
-//        type: "array",
-//        title: "MMSIs to retrieve even when outside of bounding box",
-//        items: {
-//          type: "string",
-//          title: "MMSI"
-//        }
-//      }
+      buddyFetchEnabled: {
+        type: "boolean",
+        title: "Fetch buddy locations",
+        description: "Look up MarineTraffic positions for the MMSIs in the Signal K buddy list (requires the Buddy List plugin)",
+        default: false
+      },
+      buddyFetchRate: {
+        type: "number",
+        title: "How often to fetch buddy locations (s)",
+        default: 300
+      },
     }
   }
 
@@ -143,10 +154,46 @@ module.exports = function(app)
     }
   }
 
+  // Keep the MMSI -> ship id reverse index in sync for a ship record. Writes
+  // only when the mapping is missing, so it doubles as lazy back-population
+  // for records that were cached before the index existed.
+  function indexMmsi(ship, shipid) {
+    if (ship && ship.mmsi !== undefined && ship.mmsi !== null) {
+      const key = `mmsi:${ship.mmsi}`
+      if (!cache.has(key)) {
+        cache.set(key, shipid)
+      }
+    }
+  }
+
+  // Back-populate the reverse index for every ship already in the persistent
+  // cache, so an upgraded install can resolve buddy MMSIs without a single
+  // network lookup.
+  function backfillReverseMmsiIndex() {
+    if (typeof cache.keys !== 'function') {
+      return
+    }
+    let added = 0
+    for (const shipid of cache.keys()) {
+      if (shipid.startsWith('mmsi:')) {
+        continue
+      }
+      const ship = cache.get(shipid)
+      if (ship && ship.mmsi !== undefined && ship.mmsi !== null &&
+          !cache.has(`mmsi:${ship.mmsi}`)) {
+        cache.set(`mmsi:${ship.mmsi}`, shipid)
+        added++
+      }
+    }
+    if (added > 0) {
+      app.debug(`back-filled ${added} mmsi reverse cache entr${added === 1 ? 'y' : 'ies'}`)
+    }
+  }
+
   // Resolve a vessel's static details, fetching them on first sight. Returns
   // undefined when the details are unavailable (e.g. we were rate limited), in
   // which case the caller skips the vessel until a later cycle.
-  async function getShipData(shipid) {
+  async function getShipData(shipid, state) {
     if (cache.has(shipid)) {
       app.debug(`Cache hit: ${shipid}`);
       return cache.get(shipid);
@@ -154,12 +201,13 @@ module.exports = function(app)
 
     app.debug(`Cache miss: ${shipid} fetching new data`);
     var url = `https://www.marinetraffic.com/en/vessels/${shipid}/general`;
-    const response = await marineTrafficGet(url);
+    const response = await marineTrafficGet(url, state);
     if (response === null) {
       return undefined;
     }
     app.debug(response.data);
     cache.set(shipid, response.data);
+    indexMmsi(response.data, shipid);
     return response.data;
   }
 
@@ -170,7 +218,7 @@ module.exports = function(app)
     {
       return null
     }
-    const ship = await getShipData(vessel.SHIP_ID);
+    const ship = await getShipData(vessel.SHIP_ID, boxState);
     app.debug(ship);
     // signalk indexes on mmsi, so no mmsi == no bueno
     if (typeof ship === 'undefined' || ship.mmsi === undefined || ship.mmsi === null)
@@ -270,14 +318,251 @@ module.exports = function(app)
     app.debug(JSON.stringify(delta, null, 2))
     return delta;
   }
-  
+
+  // ---- Buddy locations ---------------------------------------------------
+  // Optional integration with signalk-buddylist-plugin. We read its configured
+  // buddy list in-process (app.getPluginOptions), resolve each MMSI to a
+  // MarineTraffic ship id, then fetch that ship's current position.
+
+  function mmsiFromUrn(urn) {
+    if (typeof urn !== 'string') {
+      return undefined
+    }
+    const match = urn.match(/mmsi:(\d+)$/)
+    return match ? match[1] : undefined
+  }
+
+  function getBuddies() {
+    if (typeof app.getPluginOptions !== 'function') {
+      app.debug('app.getPluginOptions unavailable; cannot read the buddy list')
+      return []
+    }
+    let options
+    try {
+      options = app.getPluginOptions(BUDDY_PLUGIN_ID)
+    } catch (err) {
+      app.debug(`could not read ${BUDDY_PLUGIN_ID} options: ${err.message}`)
+      return []
+    }
+    const list = options && Array.isArray(options.buddies) ? options.buddies : []
+    const buddies = []
+    for (const buddy of list) {
+      const mmsi = mmsiFromUrn(buddy && buddy.urn)
+      if (mmsi) {
+        buddies.push({ mmsi, name: buddy.name, urn: buddy.urn })
+      } else {
+        app.debug(`skipping buddy without a usable mmsi urn: ${JSON.stringify(buddy)}`)
+      }
+    }
+    return buddies
+  }
+
+  // Reverse query: find a ship id already in the persistent cache whose
+  // /general data carries this MMSI. Avoids hitting MarineTraffic (and
+  // Cloudflare) again for a mapping we already know.
+  function findShipIdByMmsi(mmsi) {
+    const key = `mmsi:${mmsi}`
+    if (cache.has(key)) {
+      app.debug(`Reverse cache hit (mmsi): ${mmsi}`)
+      return cache.get(key)
+    }
+    if (typeof cache.keys !== 'function') {
+      return undefined
+    }
+    for (const cachedKey of cache.keys()) {
+      if (cachedKey.startsWith('mmsi:')) {
+        continue
+      }
+      const data = cache.get(cachedKey)
+      if (data && data.mmsi !== undefined && data.mmsi !== null &&
+          Number(data.mmsi) === Number(mmsi)) {
+        cache.set(key, cachedKey)
+        app.debug(`Reverse cache scan hit (mmsi): ${mmsi} -> ${cachedKey}`)
+        return cachedKey
+      }
+    }
+    return undefined
+  }
+
+  // MMSI -> MarineTraffic ship id. Resolved from the persistent cache when
+  // possible; otherwise via the public search endpoint, whose result is cached
+  // (both directions) so later cycles need no network lookup.
+  async function resolveShipId(mmsi) {
+    const cached = findShipIdByMmsi(mmsi)
+    if (cached !== undefined) {
+      return cached
+    }
+
+    app.debug(`Resolving ship id for mmsi ${mmsi} via MarineTraffic search`)
+    const url = `https://www.marinetraffic.com/en/global_search/search?term=${encodeURIComponent(mmsi)}`
+    const response = await marineTrafficGet(url, buddyState)
+    if (response === null) {
+      return undefined
+    }
+
+    const results = response.data && Array.isArray(response.data.results)
+      ? response.data.results
+      : []
+    const match = results.find(
+      (r) => r && r.type === 'MMSI' && Number(r.value) === Number(mmsi)
+    )
+    if (!match || match.id === undefined || match.id === null) {
+      return undefined
+    }
+
+    cache.set(`mmsi:${mmsi}`, match.id)
+    return match.id
+  }
+
+  async function fetchVesselPosition(shipId) {
+    const url = `https://www.marinetraffic.com/en/vessels/${shipId}/position?cb=_${Date.now()}`
+    const response = await marineTrafficGet(url, buddyState)
+    if (response === null) {
+      return undefined
+    }
+    const data = response.data
+    // When MarineTraffic has no current fix it returns an empty array.
+    if (!data || Array.isArray(data) || toFiniteNumber(data.lat) === undefined ||
+        toFiniteNumber(data.lon) === undefined) {
+      return undefined
+    }
+    return data
+  }
+
+  function buddyToDelta(buddy, ship, position) {
+    const timestampSeconds = toFiniteNumber(position.timestamp)
+    const timestamp = timestampSeconds === undefined
+      ? new Date().toISOString()
+      : new Date(timestampSeconds * 1000).toISOString()
+
+    const delta = {
+      context: `vessels.urn:mrn:imo:mmsi:${buddy.mmsi}`,
+      updates: [
+        {
+          timestamp,
+          source: { label: 'marinetraffic' },
+          values: []
+        }
+      ]
+    }
+
+    addValue(delta, '', { mmsi: buddy.mmsi })
+    addValue(delta, '', { name: buddy.name || ship.name })
+    if (ship.imo) {
+      addValue(delta, '', { imo: ship.imo })
+    }
+    if (ship.callsign) {
+      addValue(delta, '', { callsign: ship.callsign })
+    }
+
+    addValue(delta, 'navigation.position', {
+      latitude: toFiniteNumber(position.lat),
+      longitude: toFiniteNumber(position.lon)
+    })
+
+    const course = toFiniteNumber(position.course)
+    if (course !== undefined) {
+      addValue(delta, 'navigation.courseOverGroundTrue', degsToRad(course))
+    }
+    const heading = toFiniteNumber(position.heading)
+    if (heading !== undefined) {
+      addValue(delta, 'navigation.headingTrue', degsToRad(heading))
+    }
+    // MarineTraffic reports speed in knots; Signal K expects m/s.
+    const speed = toFiniteNumber(position.speed)
+    if (speed !== undefined) {
+      addValue(delta, 'navigation.speedOverGround', speed * 0.514444)
+    }
+
+    const width = toFiniteNumber(ship.width)
+    if (width !== undefined) {
+      addValue(delta, 'design.beam', width)
+    }
+    const length = toFiniteNumber(ship.length)
+    if (length !== undefined) {
+      addValue(delta, 'design.length', { overall: length })
+    }
+    const shipType = toFiniteNumber(ship.typeId)
+    if (shipType !== undefined) {
+      addValue(delta, 'design.aisShipType', {
+        id: shipType,
+        name: schema.getAISShipTypeName(shipType)
+      })
+    }
+
+    return delta
+  }
+
+  async function fetchBuddyLocations() {
+    const buddies = getBuddies()
+    if (buddies.length === 0) {
+      app.debug('no buddies configured (or buddy list plugin unavailable)')
+      return
+    }
+
+    buddyState.rateLimited = false
+    app.debug(`fetching MarineTraffic locations for ${buddies.length} buddy(ies)`)
+
+    for (const buddy of buddies) {
+      if (buddyState.rateLimited) {
+        app.debug('rate limited, abandoning the rest of this buddy cycle')
+        return
+      }
+
+      const context = `vessels.urn:mrn:imo:mmsi:${buddy.mmsi}`
+      if (context === selfContext) {
+        continue
+      }
+
+      try {
+        const shipId = await resolveShipId(buddy.mmsi)
+        if (shipId === undefined) {
+          continue
+        }
+        const ship = await getShipData(shipId, buddyState)
+        if (typeof ship === 'undefined') {
+          continue
+        }
+        const position = await fetchVesselPosition(shipId)
+        if (position === undefined) {
+          app.debug(`no position available for buddy ${buddy.mmsi}`)
+          continue
+        }
+
+        const delta = buddyToDelta(buddy, ship, position)
+
+        // Don't overwrite newer information we already hold (e.g. from our own
+        // AIS receiver), mirroring the bounding box flow.
+        const existing = app.getPath(context)
+        const previous = _.get(existing, 'navigation.position.timestamp')
+        if (previous && moment(previous).isAfter(moment(delta.updates[0].timestamp))) {
+          app.debug(`ignoring stale buddy position for ${buddy.mmsi}`)
+          continue
+        }
+
+        app.handleMessage(plugin.id, delta)
+      } catch (err) {
+        app.debug(`buddy ${buddy.mmsi} lookup failed: ${err && err.message ? err.message : err}`)
+      }
+    }
+  }
+
+  var fetchBuddyLocationsSafe = async function() {
+    try {
+      await fetchBuddyLocations()
+    } catch (err) {
+      app.error(`buddy update failed: ${err && err.message ? err.message : err}`)
+    }
+  }
+
   plugin.start = function(options)
   {
     cache = new pnc.PersistentNodeCache("ships", 1000, app.getDataDirPath());
+    backfillReverseMmsiIndex();
 
     var doUpdate = async function()
     {
-      rateLimited = false
+      boxState.rateLimited = false
 
       // The bounding box search is the only data source; honour the schema
       // option rather than ignoring it.
@@ -307,13 +592,13 @@ module.exports = function(app)
       app.debug("northeast: %o", northeast)
       for (let x = southwest.x; x <= northeast.x+1; x++) {
         for (let y = southwest.y; y >= northeast.y-1; y--) {
-          if (rateLimited) {
+          if (boxState.rateLimited) {
             app.debug("rate limited, abandoning the rest of this cycle")
             return
           }
           var url = `https://www.marinetraffic.com/getData/get_data_json_4/z:10/X:${x}/Y:${y}/station:0`
           app.debug("url: %o", url);
-          const response = await marineTrafficGet(url)
+          const response = await marineTrafficGet(url, boxState)
           if (response === null) {
             // null only happens when the circuit breaker tripped; the outer
             // loop will observe the flag and stop.
@@ -342,6 +627,16 @@ module.exports = function(app)
       rate = 61
     startTimeout = setTimeout(update, 5000)
     interval = setInterval(update, rate * 1000)
+
+    if (options.buddyFetchEnabled) {
+      var buddyRate = Number(options.buddyFetchRate)
+      if (!Number.isFinite(buddyRate) || buddyRate < BUDDY_FETCH_MIN_SECONDS) {
+        buddyRate = BUDDY_FETCH_DEFAULT_SECONDS
+      }
+      app.debug(`buddy location fetch enabled every ${buddyRate}s`)
+      buddyStartTimeout = setTimeout(fetchBuddyLocationsSafe, 10000)
+      buddyInterval = setInterval(fetchBuddyLocationsSafe, buddyRate * 1000)
+    }
   }
 
   plugin.stop = function()
@@ -353,6 +648,14 @@ module.exports = function(app)
     if ( interval ) {
       clearInterval(interval)
       interval = undefined
+    }
+    if ( buddyStartTimeout ) {
+      clearTimeout(buddyStartTimeout)
+      buddyStartTimeout = undefined
+    }
+    if ( buddyInterval ) {
+      clearInterval(buddyInterval)
+      buddyInterval = undefined
     }
   }
 
@@ -419,6 +722,17 @@ function isNumeric(str)
   if (typeof str != "string") return false // we only process strings!  
   return !isNaN(str) && // use type coercion to parse the _entirety_ of the string (`parseFloat` alone does not do this)...
          !isNaN(parseFloat(str)) // ...and ensure strings of whitespace fail
+}
+
+// Number() coerces null/'' to 0, which would publish bogus zeroes, so reject
+// those before coercing. Returns undefined for anything not a finite number.
+function toFiniteNumber(value)
+{
+  if (value === null || value === undefined || value === '') {
+    return undefined
+  }
+  const num = Number(value)
+  return Number.isFinite(num) ? num : undefined
 }
 
 function mod(x,y){

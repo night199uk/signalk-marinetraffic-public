@@ -6,7 +6,10 @@
   "signalk-plugin-enabled-by-default": true,
   "signalk": {
     "displayName": "MarineTraffic Public",
-    "appIcon": "./icon.svg"
+    "appIcon": "./icon.svg",
+    "recommends": [
+      "signalk-buddylist-plugin"
+    ]
   },
   "scripts": {
     "test": "node --check index.js"
