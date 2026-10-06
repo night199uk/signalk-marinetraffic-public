@@ -40,7 +40,10 @@ const MARINETRAFFIC_TIMEOUT_MS = 20000
 
 const MARINETRAFFIC_HEADERS = {
   "Accept": "*/*",
-  "Accept-Encoding": "gzip, deflate, br, zstd",
+  // Deliberately omit br/zstd. Node 24 + axios' http adapter has known issues
+  // with the brotli decompression stream that can surface as unhandled
+  // rejections; gzip/deflate are handled reliably.
+  "Accept-Encoding": "gzip, deflate",
   "Accept-Language": "en-US,en;q=0.9",
   "Connection": "close",
   "Cache-Control": "no-cache",
@@ -115,16 +118,22 @@ module.exports = function(app)
     if (state.rateLimited) {
       return null
     }
-    const request = axios.get(url, {
-      headers: MARINETRAFFIC_HEADERS,
-      timeout: MARINETRAFFIC_TIMEOUT_MS
-    })
-    // Attach a no-op handler so the request promise can never surface as an
-    // unhandled rejection, even if something interrupts the await chain.
-    request.catch(() => {})
+
+    let response
     try {
-      return await request
+      response = await axios.get(url, {
+        headers: MARINETRAFFIC_HEADERS,
+        timeout: MARINETRAFFIC_TIMEOUT_MS,
+        // Node 24 + axios' http adapter can raise an uncaught exception that
+        // aborts the process (axios#10558). The fetch adapter does not.
+        adapter: 'fetch',
+        // Resolve on every HTTP status rather than rejecting. We handle a 403
+        // ourselves, and letting axios reject it can surface the same error a
+        // second time as an unhandled rejection that floods the server log.
+        validateStatus: () => true
+      })
     } catch (err) {
+      // Only transport-level failures (DNS, TLS, timeout) reach here now.
       if (isRateLimited(err)) {
         state.rateLimited = true
         logInfo(REJECTED_MESSAGE)
@@ -132,6 +141,14 @@ module.exports = function(app)
       }
       throw err
     }
+
+    if (response && response.status === 403) {
+      state.rateLimited = true
+      logInfo(REJECTED_MESSAGE)
+      return null
+    }
+
+    return response
   }
 
   plugin.schema = {

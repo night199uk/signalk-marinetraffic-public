@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-06
+
+### Fixed
+
+- Use axios' **fetch adapter**. On Node 24 the http adapter can raise an
+  uncaught exception that aborts the process (axios#10558); this was
+  crash-looping the Signal K server.
+- **Resolve** 403 responses instead of letting axios reject them, and handle the
+  status in the plugin. The rejected 403 was also surfacing as an unhandled
+  rejection and flooding the log; it is now a single info line per cycle.
+
+### Changed
+
+- Request `gzip, deflate` only (drop `br`/`zstd`) to avoid Node 24's brotli
+  decompression path.
+
 ## [0.1.2] - 2026-10-06
 
 ### Fixed
