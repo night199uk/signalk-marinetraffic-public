@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-06
+
+### Fixed
+
+- Guard against a MarineTraffic response with no body, which could throw
+  `Cannot read properties of undefined (reading 'data')` and abort the update
+  cycle.
+- Recognise a Cloudflare 403 even when the status is not exposed on
+  `err.response` (`err.status` / `err.statusCode`), and treat the Cloudflare
+  block page as rate limiting.
+- Attach a no-op handler to each request so a rejection can never surface as an
+  unhandled rejection.
+
+### Changed
+
+- Add a 20s request timeout so a stalled request cannot hang a cycle.
+
 ## [0.1.1] - 2026-10-06
 
 ### Added

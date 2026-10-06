@@ -35,6 +35,9 @@ const BUDDY_PLUGIN_ID = 'signalk-buddylist-plugin'
 const BUDDY_FETCH_MIN_SECONDS = 60
 const BUDDY_FETCH_DEFAULT_SECONDS = 300
 
+// Give up on a MarineTraffic request rather than let it hang forever.
+const MARINETRAFFIC_TIMEOUT_MS = 20000
+
 const MARINETRAFFIC_HEADERS = {
   "Accept": "*/*",
   "Accept-Encoding": "gzip, deflate, br, zstd",
@@ -87,7 +90,21 @@ module.exports = function(app)
   }
 
   function isRateLimited(err) {
-    return !!err && !!err.response && err.response.status === 403
+    if (!err) {
+      return false
+    }
+    const status = err.response
+      ? err.response.status
+      : err.status || err.statusCode
+    if (status === 403) {
+      return true
+    }
+    // Cloudflare occasionally returns its "unable to access" block page in a
+    // shape where axios exposes no usable status; treat that as rate limiting
+    // too so it can't escape as an unhandled rejection.
+    const body = err.response && err.response.data
+    return typeof body === 'string' &&
+      (body.includes('unable_to_access') || body.includes('You are unable to access'))
   }
 
   // GET a MarineTraffic URL. A 403 means Cloudflare is rate limiting us: we
@@ -98,8 +115,15 @@ module.exports = function(app)
     if (state.rateLimited) {
       return null
     }
+    const request = axios.get(url, {
+      headers: MARINETRAFFIC_HEADERS,
+      timeout: MARINETRAFFIC_TIMEOUT_MS
+    })
+    // Attach a no-op handler so the request promise can never surface as an
+    // unhandled rejection, even if something interrupts the await chain.
+    request.catch(() => {})
     try {
-      return await axios.get(url, { headers: MARINETRAFFIC_HEADERS })
+      return await request
     } catch (err) {
       if (isRateLimited(err)) {
         state.rateLimited = true
@@ -144,7 +168,10 @@ module.exports = function(app)
 
   async function marineTrafficToDeltas(response)
   {
-    for (const vessel of response.data.rows) {
+    const rows = response && response.data && Array.isArray(response.data.rows)
+      ? response.data.rows
+      : []
+    for (const vessel of rows) {
       var delta = await getVesselDelta(vessel)
       if ( delta == null ) {
         continue
@@ -202,7 +229,7 @@ module.exports = function(app)
     app.debug(`Cache miss: ${shipid} fetching new data`);
     var url = `https://www.marinetraffic.com/en/vessels/${shipid}/general`;
     const response = await marineTrafficGet(url, state);
-    if (response === null) {
+    if (!response || !response.data) {
       return undefined;
     }
     app.debug(response.data);
@@ -396,7 +423,7 @@ module.exports = function(app)
     app.debug(`Resolving ship id for mmsi ${mmsi} via MarineTraffic search`)
     const url = `https://www.marinetraffic.com/en/global_search/search?term=${encodeURIComponent(mmsi)}`
     const response = await marineTrafficGet(url, buddyState)
-    if (response === null) {
+    if (!response || !response.data) {
       return undefined
     }
 
@@ -417,7 +444,7 @@ module.exports = function(app)
   async function fetchVesselPosition(shipId) {
     const url = `https://www.marinetraffic.com/en/vessels/${shipId}/position?cb=_${Date.now()}`
     const response = await marineTrafficGet(url, buddyState)
-    if (response === null) {
+    if (!response || !response.data) {
       return undefined
     }
     const data = response.data
@@ -599,9 +626,9 @@ module.exports = function(app)
           var url = `https://www.marinetraffic.com/getData/get_data_json_4/z:10/X:${x}/Y:${y}/station:0`
           app.debug("url: %o", url);
           const response = await marineTrafficGet(url, boxState)
-          if (response === null) {
-            // null only happens when the circuit breaker tripped; the outer
-            // loop will observe the flag and stop.
+          if (!response || !response.data) {
+            // null happens when the circuit breaker tripped; the outer loop
+            // will observe the flag and stop.
             continue
           }
           app.debug('%o', response.data);
