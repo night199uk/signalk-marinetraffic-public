@@ -84,6 +84,18 @@ module.exports = function(app)
   // send further requests for that flow.
   const boxState = { rateLimited: false }
   const buddyState = { rateLimited: false }
+
+  // EXPERIMENT: impit transport for browser TLS/HTTP2 impersonation. Defaults
+  // to impit on this branch; set MARINETRAFFIC_TRANSPORT=axios to disable.
+  let impit = undefined
+  if ((process.env.MARINETRAFFIC_TRANSPORT || 'impit').toLowerCase() !== 'axios') {
+    try {
+      const { Impit } = require('impit')
+      impit = new Impit({ browser: 'chrome' })
+    } catch (err) {
+      console.error(`signalk-marinetraffic-public: impit unavailable: ${err.message}`)
+    }
+  }
   
   plugin.id = "signalk-marinetraffic-public"
   plugin.name = "MarineTraffic Public"
@@ -122,6 +134,29 @@ module.exports = function(app)
   // log once and trip the supplied flow's circuit breaker for the rest of its
   // cycle, so the caller abandons the cycle instead of hammering the site
   // further. Any other error is rethrown unchanged.
+  // Fetch through impit, normalising its fetch-style response to the axios
+  // shape the callers expect ({ status, headers, data }).
+  async function impitGet(url) {
+    const res = await impit.fetch(url, {
+      headers: MARINETRAFFIC_HEADERS,
+      signal: AbortSignal.timeout(MARINETRAFFIC_TIMEOUT_MS)
+    })
+    const text = await res.text()
+    let data = text
+    try {
+      data = JSON.parse(text)
+    } catch {
+      // not JSON; keep the raw text
+    }
+    const headers = {}
+    if (res.headers && typeof res.headers.forEach === 'function') {
+      res.headers.forEach((value, name) => {
+        headers[name] = value
+      })
+    }
+    return { status: res.status, statusText: res.statusText, headers, data }
+  }
+
   async function marineTrafficGet(url, state) {
     if (state.rateLimited) {
       return null
@@ -129,20 +164,20 @@ module.exports = function(app)
 
     let response
     try {
-      response = await axios.get(url, {
-        headers: MARINETRAFFIC_HEADERS,
-        timeout: MARINETRAFFIC_TIMEOUT_MS,
-        // Resolve on every HTTP status rather than rejecting. We handle a 403
-        // ourselves; letting axios reject it can surface the same error a
-        // second time as an unhandled rejection that floods the server log.
-        // This also avoids the rejected-request path that could abort the
-        // process on Node 24 (axios#10558). The default (http) adapter is used
-        // deliberately: undici's fetch adapter reorders/lowercases headers,
-        // which trips Cloudflare's bot detection.
-        validateStatus: () => true
-      })
+      response = impit
+        ? await impitGet(url)
+        : await axios.get(url, {
+            headers: MARINETRAFFIC_HEADERS,
+            timeout: MARINETRAFFIC_TIMEOUT_MS,
+            // Resolve on every HTTP status rather than rejecting. We handle a
+            // 403 ourselves; letting axios reject it can surface the same error
+            // a second time as an unhandled rejection that floods the server
+            // log, and avoids the rejected-request path that can abort the
+            // process on Node 24 (axios#10558).
+            validateStatus: () => true
+          })
     } catch (err) {
-      // Only transport-level failures (DNS, TLS, timeout) reach here now.
+      // Only transport-level failures (DNS, TLS, timeout) reach here.
       if (isRateLimited(err)) {
         state.rateLimited = true
         logInfo(REJECTED_MESSAGE)
