@@ -124,12 +124,13 @@ module.exports = function(app)
       response = await axios.get(url, {
         headers: MARINETRAFFIC_HEADERS,
         timeout: MARINETRAFFIC_TIMEOUT_MS,
-        // Node 24 + axios' http adapter can raise an uncaught exception that
-        // aborts the process (axios#10558). The fetch adapter does not.
-        adapter: 'fetch',
         // Resolve on every HTTP status rather than rejecting. We handle a 403
-        // ourselves, and letting axios reject it can surface the same error a
+        // ourselves; letting axios reject it can surface the same error a
         // second time as an unhandled rejection that floods the server log.
+        // This also avoids the rejected-request path that could abort the
+        // process on Node 24 (axios#10558). The default (http) adapter is used
+        // deliberately: undici's fetch adapter reorders/lowercases headers,
+        // which trips Cloudflare's bot detection.
         validateStatus: () => true
       })
     } catch (err) {

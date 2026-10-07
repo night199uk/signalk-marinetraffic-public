@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-06
+
+### Fixed
+
+- Keep the default **http adapter** and handle 403s with `validateStatus`
+  instead of switching to the fetch adapter. The fetch adapter (undici)
+  reorders and lowercases the browser-like request headers (`host`,
+  `connection` and `sec-fetch-mode` in particular), which trips Cloudflare's
+  bot detection and makes every request 403. The http adapter sends the headers
+  in the case and order we specify.
+- Because 403s now resolve instead of rejecting, they no longer surface as
+  unhandled rejections, and the rejected-request path that could abort the
+  process on Node 24 (axios#10558) is avoided. No more crash-looping.
+
+### Changed
+
+- Request `gzip, deflate` only (drop `br`/`zstd`) to avoid Node 24's brotli
+  decompression path.
+
+### Notes
+
+- `0.1.2` and `0.1.3` were never published to npm; `0.1.4` supersedes both.
+
 ## [0.1.3] - 2026-10-06
 
 ### Fixed
