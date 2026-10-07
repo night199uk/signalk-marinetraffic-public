@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-07
+
+### Fixed
+
+- Read the buddy list even when the running Signal K does not expose
+  `app.getPluginOptions` on the plugin's app (for example Signal K 2.33.0). It
+  now falls back to the buddy plugin's saved options file
+  (`<configPath>/plugin-config-data/signalk-buddylist-plugin.json`). Previously
+  the buddy locations feature silently found no buddies on those servers.
+
 ## [0.1.4] - 2026-10-06
 
 ### Fixed

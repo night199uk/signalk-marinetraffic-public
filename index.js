@@ -15,6 +15,8 @@
  */
 
 const _ = require('lodash')
+const fs = require('fs')
+const path = require('path')
 const schema = require('@signalk/signalk-schema')
 const pnc = require('persistent-node-cache')
 const moment = require('moment')
@@ -377,19 +379,37 @@ module.exports = function(app)
     return match ? match[1] : undefined
   }
 
-  function getBuddies() {
-    if (typeof app.getPluginOptions !== 'function') {
-      app.debug('app.getPluginOptions unavailable; cannot read the buddy list')
-      return []
+  // The buddy list can be read in-process via app.getPluginOptions() when the
+  // running Signal K exposes it. Not every version does (e.g. 2.33.0 does not
+  // put it on the plugin's app), so fall back to the buddy plugin's saved
+  // options file, which sits alongside our own data directory
+  // (<configPath>/plugin-config-data/<pluginId>.json).
+  function readBuddyOptions() {
+    if (typeof app.getPluginOptions === 'function') {
+      try {
+        const options = app.getPluginOptions(BUDDY_PLUGIN_ID)
+        if (options && Array.isArray(options.buddies)) {
+          return options.buddies
+        }
+      } catch (err) {
+        app.debug(`app.getPluginOptions(${BUDDY_PLUGIN_ID}) failed: ${err.message}`)
+      }
     }
-    let options
+
     try {
-      options = app.getPluginOptions(BUDDY_PLUGIN_ID)
+      const file = path.join(path.dirname(app.getDataDirPath()), `${BUDDY_PLUGIN_ID}.json`)
+      const options = JSON.parse(fs.readFileSync(file, 'utf8'))
+      return options && options.configuration && Array.isArray(options.configuration.buddies)
+        ? options.configuration.buddies
+        : []
     } catch (err) {
-      app.debug(`could not read ${BUDDY_PLUGIN_ID} options: ${err.message}`)
+      app.debug(`could not read ${BUDDY_PLUGIN_ID} config: ${err.message}`)
       return []
     }
-    const list = options && Array.isArray(options.buddies) ? options.buddies : []
+  }
+
+  function getBuddies() {
+    const list = readBuddyOptions()
     const buddies = []
     for (const buddy of list) {
       const mmsi = mmsiFromUrn(buddy && buddy.urn)
