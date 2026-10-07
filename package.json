@@ -26,6 +26,7 @@
   "dependencies": {
     "@signalk/signalk-schema": "^1.0.3",
     "axios": "^1.13.2",
+    "impit": "^0.14.5",
     "lodash": "^4.17.21",
     "moment": "^2.30.1",
     "persistent-node-cache": "^1.2.0"
