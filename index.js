@@ -37,6 +37,11 @@ const BUDDY_PLUGIN_ID = 'signalk-buddylist-plugin'
 const BUDDY_FETCH_MIN_SECONDS = 60
 const BUDDY_FETCH_DEFAULT_SECONDS = 300
 
+// Pause between individual buddy lookups within a cycle. MarineTraffic rejects
+// bursts, and increasing the cycle interval alone does not space out the
+// requests because every buddy is fetched back-to-back.
+const BUDDY_REQUEST_DELAY_DEFAULT_MS = 1000
+
 // Give up on a MarineTraffic request rather than let it hang forever.
 const MARINETRAFFIC_TIMEOUT_MS = 20000
 
@@ -70,6 +75,7 @@ module.exports = function(app)
   var interval = undefined
   var buddyStartTimeout = undefined
   var buddyInterval = undefined
+  let buddyRequestDelayMs = BUDDY_REQUEST_DELAY_DEFAULT_MS
   let selfContext = 'vessels.' + app.selfId
   let cache = undefined
 
@@ -182,6 +188,12 @@ module.exports = function(app)
         type: "number",
         title: "How often to fetch buddy locations (s)",
         default: 300
+      },
+      buddyRequestDelay: {
+        type: "number",
+        title: "Delay between buddy requests (ms)",
+        description: "Pause between each MarineTraffic buddy lookup to reduce the chance of being rate limited. Set to 0 to disable.",
+        default: BUDDY_REQUEST_DELAY_DEFAULT_MS
       },
     }
   }
@@ -559,21 +571,32 @@ module.exports = function(app)
   }
 
   async function fetchBuddyLocations() {
-    const buddies = getBuddies()
+    // Fetch buddies in a random order each cycle. MarineTraffic can reject a
+    // request part way through a cycle, which abandons the rest of it; if we
+    // always started from the configured order, the same early buddies would
+    // be retried every cycle and later ones could be starved indefinitely.
+    const buddies = shuffle(getBuddies())
     if (buddies.length === 0) {
       app.debug('no buddies configured (or buddy list plugin unavailable)')
       return
     }
 
     buddyState.rateLimited = false
-    app.debug(`fetching MarineTraffic locations for ${buddies.length} buddy(ies)`)
+    app.debug(`fetching MarineTraffic locations for ${buddies.length} buddy(ies) in order: ${buddies.map((b) => b.mmsi).join(', ')}`)
 
-    for (const buddy of buddies) {
+    for (let i = 0; i < buddies.length; i++) {
       if (buddyState.rateLimited) {
         app.debug('rate limited, abandoning the rest of this buddy cycle')
         return
       }
 
+      // Space out the lookups so a cycle with several buddies does not burst
+      // MarineTraffic and trip the rate limiter.
+      if (i > 0 && buddyRequestDelayMs > 0) {
+        await sleep(buddyRequestDelayMs)
+      }
+
+      const buddy = buddies[i]
       const context = `vessels.urn:mrn:imo:mmsi:${buddy.mmsi}`
       if (context === selfContext) {
         continue
@@ -698,6 +721,11 @@ module.exports = function(app)
       if (!Number.isFinite(buddyRate) || buddyRate < BUDDY_FETCH_MIN_SECONDS) {
         buddyRate = BUDDY_FETCH_DEFAULT_SECONDS
       }
+      var buddyRequestDelay = Number(options.buddyRequestDelay)
+      if (!Number.isFinite(buddyRequestDelay) || buddyRequestDelay < 0) {
+        buddyRequestDelay = BUDDY_REQUEST_DELAY_DEFAULT_MS
+      }
+      buddyRequestDelayMs = buddyRequestDelay
       app.debug(`buddy location fetch enabled every ${buddyRate}s`)
       buddyStartTimeout = setTimeout(fetchBuddyLocationsSafe, 10000)
       buddyInterval = setInterval(fetchBuddyLocationsSafe, buddyRate * 1000)
@@ -798,6 +826,24 @@ function toFiniteNumber(value)
   }
   const num = Number(value)
   return Number.isFinite(num) ? num : undefined
+}
+
+// Fisher-Yates shuffle. Returns a copy so the caller's array is untouched.
+function shuffle(list)
+{
+  const result = list.slice()
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = result[i]
+    result[i] = result[j]
+    result[j] = tmp
+  }
+  return result
+}
+
+function sleep(ms)
+{
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function mod(x,y){

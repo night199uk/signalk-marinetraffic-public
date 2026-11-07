@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Delay between buddy requests (ms)** option, default `1000`. Requests within
+  a buddy cycle are now spaced out instead of being sent back-to-back, reducing
+  the chance of tripping MarineTraffic's rate limiter.
+
+### Fixed
+
+- Declare `lodash` and `moment` as direct dependencies. They were imported by
+  `index.js` but only resolved transitively through `@signalk/signalk-schema`,
+  which is fragile.
+- Buddy location cycles now fetch buddies in a **random order each cycle**
+  ([#5](https://github.com/night199uk/signalk-marinetraffic-public/issues/5)).
+  Previously, a rate-limit rejection partway through a cycle abandoned the rest
+  of it, and because every cycle started from the configured order the same
+  early buddies were retried while later ones could be starved indefinitely.
+  The interrupted buddy remains eligible for a later retry.
+
 ## [0.1.5] - 2026-10-07
 
 ### Fixed

@@ -45,6 +45,7 @@ npm install signalk-marinetraffic-public
 | Size of the bounding box to retrieve data (km) | `10` | Width of the box, centred on your position. |
 | Fetch buddy locations | `false` | Fetch positions for your buddy list. |
 | How often to fetch buddy locations (s) | `300` | Buddy polling interval, in seconds. Values below 60 are raised to 300. |
+| Delay between buddy requests (ms) | `1000` | Pause between each MarineTraffic buddy lookup to reduce the chance of being rate limited. Set to `0` to disable. |
 
 ## Buddy locations
 
@@ -65,6 +66,12 @@ For each buddy it:
 Because the mapping and the static details are cached, a repeat cycle usually
 makes no request beyond the position lookup.
 
+Buddies are fetched in a **random order every cycle**, with a short pause
+between requests. If MarineTraffic rate limits us partway through a cycle, the
+cycle is abandoned, but later buddies are not permanently starved: over
+successive cycles every buddy gets a turn, and any interrupted buddy remains
+eligible for a later retry.
+
 ## Data published
 
 Vessels are published under their own context, for example
@@ -83,6 +90,33 @@ deliberately does **not** reuse the MarineTraffic / Kpler logo or any asset from
 their site — those are protected by copyright and trademark and may not be
 reproduced without written permission. It only borrows the MarineTraffic blue
 palette (`#263A75`, `#037FD7`, `#0FB9E9`) for visual familiarity.
+
+## Releasing
+
+Releases are published from GitHub Actions when a version tag is pushed. The
+workflow (`.github/workflows/release.yml`) checks that the tag matches
+`package.json`, runs the tests, publishes to npm via
+[trusted publishing](https://docs.npmjs.com/trusted-publishers), and creates a
+GitHub release.
+
+1. Update `version` in `package.json` and `CHANGELOG.md`.
+2. Commit, then tag and push:
+
+   ```sh
+   git tag v0.1.6
+   git push origin v0.1.6
+   ```
+
+On npmjs.com, configure a trusted publisher for this package under
+**Settings → Trusted publishing** with:
+
+- Provider: **GitHub Actions**
+- Organization or user: `night199uk`
+- Repository: `signalk-marinetraffic-public`
+- Workflow filename: `release.yml`
+
+Enable **npm publish** for the trusted publisher (staged publishing alone will
+not publish automatically). No `NPM_TOKEN` secret is needed.
 
 ## License
 
