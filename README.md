@@ -46,6 +46,7 @@ npm install signalk-marinetraffic-public
 | Fetch buddy locations | `false` | Fetch positions for your buddy list. |
 | How often to fetch buddy locations (s) | `300` | Buddy polling interval, in seconds. Values below 60 are raised to 300. |
 | Delay between buddy requests (ms) | `1000` | Pause between each MarineTraffic buddy lookup to reduce the chance of being rate limited. Set to `0` to disable. |
+| Ignore buddy positions older than (min) | `1440` | Skip MarineTraffic positions older than this so stale fixes are not published as current. Set to `0` to disable. |
 
 ## Buddy locations
 
@@ -71,6 +72,12 @@ between requests. If MarineTraffic rate limits us partway through a cycle, the
 cycle is abandoned, but later buddies are not permanently starved: over
 successive cycles every buddy gets a turn, and any interrupted buddy remains
 eligible for a later retry.
+
+Positions older than **Ignore buddy positions older than (min)** (default 24
+hours) are skipped, because MarineTraffic can keep returning a vessel's last
+known fix long after it was current. A fix is also only published once: if the
+timestamp has not advanced since the position already held, it is not
+re-published. This keeps a stale vessel from looking freshly updated.
 
 ## Data published
 

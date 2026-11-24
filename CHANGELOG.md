@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Ignore buddy positions older than (min)** option, default `1440` (24
+  hours). MarineTraffic keeps returning a vessel's last known fix, sometimes
+  weeks after it was current; older fixes are now skipped instead of being
+  published as if fresh. Set to `0` to publish old fixes anyway.
+
+### Fixed
+
+- Do not re-publish a buddy position whose timestamp has not advanced since the
+  position already held. Previously an unchanged (possibly weeks-old) fix was
+  re-sent every cycle, which made consumers that track message arrival treat
+  the vessel as freshly updated.
+
 ## [0.1.6] - 2026-11-07
 
 ### Added
