@@ -42,6 +42,11 @@ const BUDDY_FETCH_DEFAULT_SECONDS = 300
 // requests because every buddy is fetched back-to-back.
 const BUDDY_REQUEST_DELAY_DEFAULT_MS = 1000
 
+// Ignore buddy positions older than this by default. MarineTraffic keeps
+// returning a vessel's last known fix (sometimes weeks old); publishing that as
+// if it were current is misleading. Set to 0 to publish old fixes anyway.
+const BUDDY_POSITION_MAX_AGE_DEFAULT_MINUTES = 1440
+
 // Give up on a MarineTraffic request rather than let it hang forever.
 const MARINETRAFFIC_TIMEOUT_MS = 20000
 
@@ -76,6 +81,7 @@ module.exports = function(app)
   var buddyStartTimeout = undefined
   var buddyInterval = undefined
   let buddyRequestDelayMs = BUDDY_REQUEST_DELAY_DEFAULT_MS
+  let buddyPositionMaxAgeMs = BUDDY_POSITION_MAX_AGE_DEFAULT_MINUTES * 60 * 1000
   let selfContext = 'vessels.' + app.selfId
   let cache = undefined
 
@@ -194,6 +200,12 @@ module.exports = function(app)
         title: "Delay between buddy requests (ms)",
         description: "Pause between each MarineTraffic buddy lookup to reduce the chance of being rate limited. Set to 0 to disable.",
         default: BUDDY_REQUEST_DELAY_DEFAULT_MS
+      },
+      buddyPositionMaxAge: {
+        type: "number",
+        title: "Ignore buddy positions older than (min)",
+        description: "Skip MarineTraffic positions older than this many minutes so stale fixes are not published as current. Set to 0 to disable.",
+        default: BUDDY_POSITION_MAX_AGE_DEFAULT_MINUTES
       },
     }
   }
@@ -506,11 +518,16 @@ module.exports = function(app)
     return data
   }
 
-  function buddyToDelta(buddy, ship, position) {
+  // MarineTraffic reports the fix time in Unix seconds. If it is missing, fall
+  // back to the current time; callers share this value so the published
+  // timestamp and the max-age check can't disagree.
+  function positionTimestampMs(position) {
     const timestampSeconds = toFiniteNumber(position.timestamp)
-    const timestamp = timestampSeconds === undefined
-      ? new Date().toISOString()
-      : new Date(timestampSeconds * 1000).toISOString()
+    return timestampSeconds === undefined ? Date.now() : timestampSeconds * 1000
+  }
+
+  function buddyToDelta(buddy, ship, position, timestampMs) {
+    const timestamp = new Date(timestampMs).toISOString()
 
     const delta = {
       context: `vessels.urn:mrn:imo:mmsi:${buddy.mmsi}`,
@@ -617,14 +634,24 @@ module.exports = function(app)
           continue
         }
 
-        const delta = buddyToDelta(buddy, ship, position)
+        const positionTime = positionTimestampMs(position)
+        if (buddyPositionMaxAgeMs > 0 &&
+            Date.now() - positionTime > buddyPositionMaxAgeMs) {
+          const ageMinutes = Math.round((Date.now() - positionTime) / 60000)
+          app.debug(`ignoring buddy position for ${buddy.mmsi}: ${ageMinutes} min old (max ${Math.round(buddyPositionMaxAgeMs / 60000)})`)
+          continue
+        }
+
+        const delta = buddyToDelta(buddy, ship, position, positionTime)
 
         // Don't overwrite newer information we already hold (e.g. from our own
-        // AIS receiver), mirroring the bounding box flow.
+        // AIS receiver) and don't re-publish a fix whose timestamp has not
+        // advanced. Re-sending the same stale fix makes consumers that track
+        // message arrival treat the vessel as freshly updated.
         const existing = app.getPath(context)
         const previous = _.get(existing, 'navigation.position.timestamp')
-        if (previous && moment(previous).isAfter(moment(delta.updates[0].timestamp))) {
-          app.debug(`ignoring stale buddy position for ${buddy.mmsi}`)
+        if (previous && !moment(delta.updates[0].timestamp).isAfter(moment(previous))) {
+          app.debug(`ignoring buddy position for ${buddy.mmsi}: timestamp has not advanced`)
           continue
         }
 
@@ -726,6 +753,11 @@ module.exports = function(app)
         buddyRequestDelay = BUDDY_REQUEST_DELAY_DEFAULT_MS
       }
       buddyRequestDelayMs = buddyRequestDelay
+      var buddyPositionMaxAge = Number(options.buddyPositionMaxAge)
+      if (!Number.isFinite(buddyPositionMaxAge) || buddyPositionMaxAge < 0) {
+        buddyPositionMaxAge = BUDDY_POSITION_MAX_AGE_DEFAULT_MINUTES
+      }
+      buddyPositionMaxAgeMs = buddyPositionMaxAge * 60 * 1000
       app.debug(`buddy location fetch enabled every ${buddyRate}s`)
       buddyStartTimeout = setTimeout(fetchBuddyLocationsSafe, 10000)
       buddyInterval = setInterval(fetchBuddyLocationsSafe, buddyRate * 1000)
